@@ -3,7 +3,8 @@
 
 ### Create the CodeQL database
 ```
-$ codeql database create --language="go" ./db --overwrite
+export PATH="$HOME/local/vmsync/codeql263:$PATH"
+codeql database create --language="go" ./sample-db --overwrite
 ```
 
 ### Build and run
