@@ -8,13 +8,13 @@ import semmle.go.dataflow.TaintTracking
  * 	Bad flow:
  * 	http.HandlerFunc(GetAccount) -> router.Handle
  *
+ *  Bad flow:
+ *  http.HandlerFunc(GetAccount) -> No auth check in AuthorizationMiddleware() -> router.Handle()
+ *
  * 	OK flow:
  * 	http.HandlerFunc(GetAccount) ->  AuthorizationMiddleware() -> router.Handle()
  *
  * 	We Want to find the bad flow.
- *
- * 	If we treat AuthorizationMiddleware (the concept, not the particular function) as sanitizer,
- *  the ok flow won't show.
  */
 
 import semmle.go.dataflow.internal.DataFlowUtil
@@ -27,7 +27,7 @@ import semmle.go.dataflow.internal.DataFlowUtil
  *      if (profile) != (tokenID) ...
  */
 
-class AuthValidator extends FuncTypeExpr {
+class AuthValidator extends FuncDecl {
   AuthValidator() {
     exists(CallExpr get, IndexExpr vars_id, IfStmt theIf, ComparisonExpr comp |
       //
@@ -38,7 +38,7 @@ class AuthValidator extends FuncTypeExpr {
       //
       // mux.Vars(r)["id"]
       //
-      vars_id.getIndex().(StringLit).getValue() = "id" and
+      vars_id.getIndex().(StringLit).getValue().matches("%id%") and
       vars_id.getBase().(CallExpr).getTarget().getName() = "Vars" and
       //
       // if _ <cmp> _
@@ -56,7 +56,8 @@ class AuthValidator extends FuncTypeExpr {
         source.asExpr() = vars_id and
         sink.asExpr() = comp.getAnOperand() and
         DataFlow::localFlow(source, sink)
-      )
+      ) and
+      this = theIf.getEnclosingFunction*()
     )
   }
 }
@@ -78,7 +79,7 @@ class ServeCall extends Expr {
  * Identify type HandlerFunc func(ResponseWriter, *Request)
  */
 
- predicate isHandlerFunc(FunctionName fn) {
+predicate isHandlerFunc(FunctionName fn) {
   fn.getTarget().getParameterType(0).getName() = "ResponseWriter" and
   fn.getTarget().getParameterType(1).(PointerType).getBaseType().getName() = "Request"
 }
@@ -87,7 +88,12 @@ class ServeCall extends Expr {
 //     router.Handle("/account/{id}", AuthorizationMiddleware(http.HandlerFunc(GetAccount)))
 // Signature must be  type HandlerFunc func(ResponseWriter, *Request)
 predicate isArgToCall(FunctionName fn) {
-  exists(CallExpr handle | handle.getArgument(1).getAChild*() = fn)
+  exists(CallExpr handle, StringLit lit |
+    handle.getArgument(1).getAChild*() = fn and
+    handle.getArgument(0) = lit and
+    //This can be improved to check for value in between the {} and pass that to the AuthValidator
+    lit.getValue().matches("%id%")
+  )
 }
 
 class AuthFlow extends TaintTracking::Configuration {
@@ -101,30 +107,12 @@ class AuthFlow extends TaintTracking::Configuration {
     )
   }
 
-  // override predicate isSanitizer(DataFlow::Node node) { node.asExpr() instanceof AuthValidator }
-  override predicate isSink(DataFlow::Node node) { 
-   // TODO: ServeCall must be in the body of an AuthValidator
-    node.asExpr() instanceof ServeCall
-   }
+  override predicate isSink(DataFlow::Node node) {
+    node.asExpr() instanceof ServeCall and
+    exists(FuncDecl fn | node.asExpr().getEnclosingFunction*() = fn and fn instanceof AuthValidator)
+  }
 }
 
-// For the source: `GetAccount` of
-// router.Handle("/account/{id}", AuthorizationMiddleware(http.HandlerFunc(GetAccount)))
-// 1. in 2nd argument to _.Handle
-// 2. signature must be  type HandlerFunc func(ResponseWriter, *Request)
-// For the sink:
-// 1. The `next` part of `next.ServeHTTP(rw, r)` (may be absent, see flow.)
-// For the flow:
-// 1. start with any source
-// 2. From source to sink, where the sink is NOT in the body of a wrapper
-//    (not in an AuthValidator)
-// Note: if there is no sink, the sink is clear not in the body of a wrapper.
-// Given all
-// Bad cases:
-// 1. Sources
-// 1. Flow from source to sink, where the sink is NOT in the body of a wrapper
-//    (not in an AuthValidator)
-// Note: if there is no sink, the sink is clear not in the body of a wrapper.
 from FunctionName anySource
 where
   isArgToCall(anySource) and
