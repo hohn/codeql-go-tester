@@ -63,6 +63,9 @@ class NoAuthCheckInFunction extends FuncDef {
   }
 }
 
+/* 
+  Limit sources to _.Handle("...id...")
+*/
 class MiddlewareCall extends CallExpr {
   MiddlewareCall() {
     exists(CallExpr call, StringLit lit |
